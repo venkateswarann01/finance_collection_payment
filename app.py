@@ -1,7 +1,7 @@
 # app.py
 # ============================================================
 # Weekly Finance Collection – Payment Risk Prediction
-# Streamlit Application
+# Streamlit Application (Corrected)
 # ============================================================
 
 import streamlit as st
@@ -11,6 +11,9 @@ import joblib
 import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path
+import warnings
+warnings.filterwarnings("ignore")
+
 # ------------------------------------------------------------
 # Page Config
 # ------------------------------------------------------------
@@ -82,21 +85,45 @@ st.markdown("""
 # ------------------------------------------------------------
 @st.cache_resource
 def load_model():
-    model_path = Path("payment_risk_model.pkl")
-    if not model_path.exists():
-        st.error("❌ Model file `payment_risk_model.pkl` not found. Please train & save the model first.")
+    # Try common locations
+    possible_paths = [
+        Path("payment_risk_model.pkl"),
+        Path("./payment_risk_model.pkl"),
+        Path("/home/workdir/artifacts/payment_risk_model.pkl"),
+        Path("/home/workdir/attachments/payment_risk_model.pkl"),
+    ]
+    model_path = None
+    for p in possible_paths:
+        if p.exists():
+            model_path = p
+            break
+
+    if model_path is None:
+        st.error("❌ Model file `payment_risk_model.pkl` not found.\n\nPlease place it in the same folder as `app.py` or train & save the model first.")
         st.stop()
+
     saved = joblib.load(model_path)
     return saved["model"], saved["label_encoder"], saved["features"]
 
 @st.cache_data
 def load_data():
-    csv_path = Path("weekly_finance_collection_payment_behaviour.csv")
-    if not csv_path.exists():
-        return None
-    return pd.read_csv(csv_path)
+    possible_paths = [
+        Path("weekly_finance_collection_payment_behaviour.csv"),
+        Path("./weekly_finance_collection_payment_behaviour.csv"),
+        Path("/home/workdir/attachments/weekly_finance_collection_payment_behaviour.csv"),
+        Path("/home/workdir/artifacts/weekly_finance_collection_payment_behaviour.csv"),
+    ]
+    for p in possible_paths:
+        if p.exists():
+            return pd.read_csv(p)
+    return None
 
-model, le, feature_cols = load_model()
+try:
+    model, le, feature_cols = load_model()
+except Exception as e:
+    st.error(f"Error loading model: {e}")
+    st.stop()
+
 df = load_data()
 
 # ------------------------------------------------------------
@@ -154,15 +181,14 @@ if page == "🔮 Predict Risk":
         interest_amount = st.number_input("Total Interest Amount (₹)", min_value=0.0, max_value=15000.0, value=2000.0, step=50.0)
         total_payable = st.number_input("Total Payable (₹)", min_value=1000.0, max_value=70000.0, value=12000.0, step=100.0)
 
-    # Derived features
+    # ---------- Derived features (must match training) ----------
     payment_ratio = amount_paid / (weekly_due + 1e-6)
     balance_ratio = remaining_balance / (total_payable + 1e-6)
-    week_progress = week_number / total_weeks
-    is_partial = (amount_paid > 0) and (amount_paid < weekly_due * 0.95)
+    week_progress = week_number / max(total_weeks, 1)
+    is_partial = int((amount_paid > 0) and (amount_paid < weekly_due * 0.95))   # 0 or 1
 
     st.markdown("---")
 
-    # Show derived features
     with st.expander("🔍 View Calculated Features"):
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Payment Ratio", f"{payment_ratio:.2f}")
@@ -170,9 +196,8 @@ if page == "🔮 Predict Risk":
         c3.metric("Week Progress", f"{week_progress:.2%}")
         c4.metric("Is Partial Payment", "Yes" if is_partial else "No")
 
-    # Predict button
     if st.button("🚀 Predict Payment Risk"):
-        input_data = pd.DataFrame([{
+        input_dict = {
             "Loan_Amount": loan_amount,
             "Interest_Rate_Percent": interest_rate,
             "Interest_Amount": interest_amount,
@@ -189,48 +214,54 @@ if page == "🔮 Predict Risk":
             "Balance_Ratio": balance_ratio,
             "Week_Progress": week_progress,
             "Is_Partial": is_partial
-        }])
+        }
 
-        # Ensure correct column order
-        input_data = input_data[feature_cols]
+        # Strict column order from the saved model
+        input_data = pd.DataFrame([input_dict])[feature_cols]
 
-        prediction = model.predict(input_data)[0]
-        risk_label = le.inverse_transform([prediction])[0]
+        try:
+            prediction = model.predict(input_data)[0]
+            risk_label = le.inverse_transform([prediction])[0]
+        except Exception as e:
+            st.error(f"Prediction failed: {e}")
+            st.write("Expected features:", feature_cols)
+            st.write("Provided columns:", list(input_data.columns))
+            st.stop()
 
-        # Probability (if available)
+        # Probability
+        proba_df = None
         if hasattr(model, "predict_proba"):
             proba = model.predict_proba(input_data)[0]
             proba_df = pd.DataFrame({
                 "Risk Level": le.classes_,
                 "Probability": proba
             }).sort_values("Probability", ascending=False)
-        else:
-            proba_df = None
 
         st.markdown("### Prediction Result")
 
         if risk_label == "Low":
-            st.markdown(f'<div class="risk-low">✅ LOW RISK</div>', unsafe_allow_html=True)
+            st.markdown('<div class="risk-low">✅ LOW RISK</div>', unsafe_allow_html=True)
             st.success("Customer is likely to pay on time. Low collection priority.")
         elif risk_label == "Medium":
-            st.markdown(f'<div class="risk-medium">⚠️ MEDIUM RISK</div>', unsafe_allow_html=True)
+            st.markdown('<div class="risk-medium">⚠️ MEDIUM RISK</div>', unsafe_allow_html=True)
             st.warning("Customer shows some delay patterns. Monitor closely.")
         else:
-            st.markdown(f'<div class="risk-high">🚨 HIGH RISK</div>', unsafe_allow_html=True)
+            st.markdown('<div class="risk-high">🚨 HIGH RISK</div>', unsafe_allow_html=True)
             st.error("High chance of missed/late payments. Prioritize collection efforts.")
 
         if proba_df is not None:
             st.markdown("#### Probability Distribution")
             fig, ax = plt.subplots(figsize=(7, 3.5))
             colors = {"Low": "#28a745", "Medium": "#ffc107", "High": "#dc3545"}
-            bars = ax.barh(proba_df["Risk Level"], proba_df["Probability"],
-                           color=[colors.get(r, "#6c757d") for r in proba_df["Risk Level"]])
-            ax.set_xlim(0, 1)
+            bar_colors = [colors.get(r, "#6c757d") for r in proba_df["Risk Level"]]
+            bars = ax.barh(proba_df["Risk Level"], proba_df["Probability"], color=bar_colors)
+            ax.set_xlim(0, 1.15)
             ax.set_xlabel("Probability")
             ax.set_title("Model Confidence")
             for bar, val in zip(bars, proba_df["Probability"]):
                 ax.text(val + 0.02, bar.get_y() + bar.get_height()/2, f"{val:.1%}", va="center")
             st.pyplot(fig)
+            plt.close(fig)
 
 # ============================================================
 # PAGE 2: DATA INSIGHTS
@@ -239,14 +270,13 @@ elif page == "📊 Data Insights":
     st.subheader("Dataset Overview & Insights")
 
     if df is None:
-        st.warning("CSV file not found. Place `weekly_finance_collection_payment_behaviour.csv` in the same folder.")
+        st.warning("CSV file not found. Place `weekly_finance_collection_payment_behaviour.csv` in the same folder as `app.py`.")
     else:
-        # Basic stats
         c1, c2, c3, c4 = st.columns(4)
         c1.metric("Total Records", f"{len(df):,}")
         c2.metric("Unique Customers", df["Customer_ID"].nunique())
         c3.metric("Avg Loan Amount", f"₹{df['Loan_Amount'].mean():,.0f}")
-        c4.metric("Missed Payments", f"{(df['Payment_Status']=='Missed').sum():,}")
+        c4.metric("Missed Payments", f"{(df['Payment_Status'] == 'Missed').sum():,}")
 
         st.markdown("---")
 
@@ -255,45 +285,58 @@ elif page == "📊 Data Insights":
         with tab1:
             fig, ax = plt.subplots(figsize=(8, 4))
             order = ["Low", "Medium", "High"]
-            sns.countplot(data=df, x="Payment_Risk", order=order, palette=["#28a745", "#ffc107", "#dc3545"], ax=ax)
+            # Updated seaborn usage (no FutureWarning)
+            sns.countplot(data=df, x="Payment_Risk", order=order, 
+                          hue="Payment_Risk", palette=["#28a745", "#ffc107", "#dc3545"], 
+                          legend=False, ax=ax)
             ax.set_title("Payment Risk Distribution")
             ax.set_ylabel("Count")
             st.pyplot(fig)
+            plt.close(fig)
 
             st.dataframe(
-                df["Payment_Risk"].value_counts(normalize=True).mul(100).round(1).rename("% of records").to_frame(),
+                df["Payment_Risk"].value_counts(normalize=True)
+                  .mul(100).round(1)
+                  .rename("% of records")
+                  .to_frame(),
                 use_container_width=True
             )
 
         with tab2:
             fig, ax = plt.subplots(figsize=(8, 4))
-            sns.countplot(data=df, x="Payment_Status", palette="Set2", ax=ax)
+            sns.countplot(data=df, x="Payment_Status", hue="Payment_Status", 
+                          palette="Set2", legend=False, ax=ax)
             ax.set_title("Payment Status Distribution")
             st.pyplot(fig)
+            plt.close(fig)
 
         with tab3:
             col_a, col_b = st.columns(2)
 
             with col_a:
                 fig, ax = plt.subplots(figsize=(6, 4))
-                sns.boxplot(data=df, x="Payment_Risk", y="Days_Late", order=["Low", "Medium", "High"], ax=ax)
+                sns.boxplot(data=df, x="Payment_Risk", y="Days_Late",
+                            order=["Low", "Medium", "High"], ax=ax)
                 ax.set_title("Days Late by Risk Level")
                 st.pyplot(fig)
+                plt.close(fig)
 
             with col_b:
                 fig, ax = plt.subplots(figsize=(6, 4))
-                sns.boxplot(data=df, x="Payment_Risk", y="Missed_Payments", order=["Low", "Medium", "High"], ax=ax)
+                sns.boxplot(data=df, x="Payment_Risk", y="Missed_Payments",
+                            order=["Low", "Medium", "High"], ax=ax)
                 ax.set_title("Missed Payments by Risk Level")
                 st.pyplot(fig)
+                plt.close(fig)
 
             st.markdown("#### Correlation with Risk (numeric features)")
-            # Encode risk for correlation
             risk_map = {"Low": 0, "Medium": 1, "High": 2}
             temp = df.copy()
             temp["Risk_Code"] = temp["Payment_Risk"].map(risk_map)
-            corr = temp[["Days_Late", "Missed_Payments", "Previous_Late_Count",
-                         "Loan_Amount", "Interest_Rate_Percent", "Week_Number", "Risk_Code"]].corr()["Risk_Code"].drop("Risk_Code")
-            st.bar_chart(corr.sort_values(ascending=False))
+            corr_cols = ["Days_Late", "Missed_Payments", "Previous_Late_Count",
+                         "Loan_Amount", "Interest_Rate_Percent", "Week_Number", "Risk_Code"]
+            corr = temp[corr_cols].corr()["Risk_Code"].drop("Risk_Code").sort_values(ascending=False)
+            st.bar_chart(corr)
 
 # ============================================================
 # PAGE 3: ABOUT MODEL
@@ -306,11 +349,11 @@ else:
     Predict the **Payment Risk** of a customer for a given week in a weekly finance collection loan.
 
     ### Target Classes
-    | Class   | Meaning                                      |
-    |---------|----------------------------------------------|
-    | **Low**    | Customer pays on time consistently          |
-    | **Medium** | Some delays / occasional late payments      |
-    | **High**   | Multiple missed payments or chronic delays  |
+    | Class     | Meaning                                      |
+    |-----------|----------------------------------------------|
+    | **Low**   | Customer pays on time consistently           |
+    | **Medium**| Some delays / occasional late payments       |
+    | **High**  | Multiple missed payments or chronic delays   |
 
     ### Features Used (16)
     - Loan Amount, Interest Rate, Interest Amount, Total Payable  
@@ -326,7 +369,8 @@ else:
 
     ### Performance (on this dataset)
     - Random Forest & Gradient Boosting achieved **~100% accuracy / F1**  
-    - This is expected because the target (`Payment_Risk`) is largely deterministic from features like `Days_Late`, `Missed_Payments`, and `Previous_Late_Count`.
+    - This is expected because the target (`Payment_Risk`) is largely deterministic  
+      from features like `Days_Late`, `Missed_Payments`, and `Previous_Late_Count`.
 
     ### How to use
     1. Go to **Predict Risk**  
